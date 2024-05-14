@@ -54,7 +54,7 @@
   });
 </script>
 
-<svg x={x - 10} {y} width={computedWidth + 2} height="200" id={idContainer}>
+<svg x={x - 10} {y} width={computedWidth + 2} height="300" id={idContainer}>
   <rect
     x="1"
     y="1"

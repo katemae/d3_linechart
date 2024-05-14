@@ -53,7 +53,7 @@
 <style>
   .container {
     max-width: 640px;
-    border: solid 1px black;
+    border: solid 1px rgba(255, 255, 255, 0);
     margin: auto;
   }
 </style>

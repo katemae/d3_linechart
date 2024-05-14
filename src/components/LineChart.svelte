@@ -20,8 +20,8 @@
 
   const xScale = scaleLinear()
     .domain([
-      Math.min(...data.map((d) => d[xVar])),
-      Math.max(...data.map((d) => d[xVar])),
+      2000,
+      2018
     ])
     .range([paddings.left, chartWidth - paddings.right]);
 
