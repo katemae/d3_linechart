@@ -4461,7 +4461,7 @@ var app = (function () {
     				type: "lineChart",
     				chartProps: {
     					data: energy_1,
-    					xVar: "year",
+    					xVar: "ear",
     					yVars: ["biofuel", "coal", "fossil", "gas", "hydro", "nuclear", "oil", "solar"]
     				}
     			},
@@ -4472,7 +4472,7 @@ var app = (function () {
     		c: function create() {
     			main = element("main");
     			create_component(chartcontainer.$$.fragment);
-    			add_location(main, file, 5, 0, 134);
+    			add_location(main, file, 5, 0, 129);
     		},
     		l: function claim(nodes) {
     			throw new Error("options.hydrate only works if the component was compiled with the `hydratable: true` option");

@@ -8,7 +8,7 @@
     type={"lineChart"}
     chartProps={{
       data: energy,
-      xVar: "year",
+      xVar: "ear",
       yVars: [
         "biofuel",
         "coal",
