@@ -1,3 +1,5 @@
+// rollup.config.js
+
 import svelte from 'rollup-plugin-svelte';
 import commonjs from '@rollup/plugin-commonjs';
 import resolve from '@rollup/plugin-node-resolve';
@@ -28,53 +30,40 @@ function serve() {
 	};
 }
 
+// Custom plugin to filter out circular dependency warnings
+function onwarn(warning, warn) {
+	if (warning.code === 'CIRCULAR_DEPENDENCY' && warning.importer.includes('d3')) {
+		// Ignore circular dependency warnings from D3
+		return;
+	}
+	warn(warning); // Handle other warnings normally
+}
+
 export default {
-	
 	input: 'src/main.js',
 	output: {
 		sourcemap: true,
 		format: 'iife',
-		onwarn: ( warning, next ) => {
-			if ( warning.code === 'THIS_IS_UNDEFINED' ) return; // you can do this now btw
-			next( warning );
-		},
 		name: 'app',
 		file: 'public/build/bundle.js'
 	},
 	plugins: [
 		svelte({
 			compilerOptions: {
-				// enable run-time checks when not in production
 				dev: !production
 			}
 		}),
-		// we'll extract any component CSS out into
-		// a separate file - better for performance
 		css({ output: 'bundle.css' }),
-
-		// If you have external dependencies installed from
-		// npm, you'll most likely need these plugins. In
-		// some cases you'll need additional configuration -
-		// consult the documentation for details:
-		// https://github.com/rollup/plugins/tree/master/packages/commonjs
 		resolve({
 			browser: true,
 			dedupe: ['svelte']
 		}),
 		commonjs(),
-
-		// In dev mode, call `npm run start` once
-		// the bundle has been generated
 		!production && serve(),
-
-		// Watch the `public` directory and refresh the
-		// browser on changes when not in production
 		!production && livereload('public'),
-
-		// If we're building for production (npm run build
-		// instead of npm run dev), minify
 		production && terser()
 	],
+	onwarn,
 	watch: {
 		clearScreen: false
 	}
