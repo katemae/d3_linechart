@@ -29,10 +29,15 @@ function serve() {
 }
 
 export default {
+	
 	input: 'src/main.js',
 	output: {
 		sourcemap: true,
 		format: 'iife',
+		onwarn: ( warning, next ) => {
+			if ( warning.code === 'THIS_IS_UNDEFINED' ) return; // you can do this now btw
+			next( warning );
+		},
 		name: 'app',
 		file: 'public/build/bundle.js'
 	},
