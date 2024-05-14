@@ -4,12 +4,7 @@
 </script>
 
 <main>
-  <h1>Energy Generation</h1>
-
-	<p>...</p>
-
-  <div class="chart">
-		<ChartContainer
+  <ChartContainer
     type={"lineChart"}
     chartProps={{
       data: energy,
@@ -26,19 +21,4 @@
       ],
     }}
   />
-	</div>
 </main>
-
-<style>
-	h1 {
-		text-align: center;
-	}
-
-	p {
-		text-align: center;
-	}
-
-	.chart {
-		text-align: center;
-	}
-</style>
