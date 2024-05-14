@@ -40,7 +40,9 @@ var app = (function () {
         target.insertBefore(node, anchor || null);
     }
     function detach(node) {
-        node.parentNode.removeChild(node);
+        if (node.parentNode) {
+            node.parentNode.removeChild(node);
+        }
     }
     function destroy_each(iterations, detaching) {
         for (let i = 0; i < iterations.length; i += 1) {
@@ -56,6 +58,9 @@ var app = (function () {
     }
     function text(data) {
         return document.createTextNode(data);
+    }
+    function space() {
+        return text(' ');
     }
     function empty() {
         return text('');
@@ -73,9 +78,9 @@ var app = (function () {
     function children(element) {
         return Array.from(element.childNodes);
     }
-    function custom_event(type, detail, bubbles = false) {
+    function custom_event(type, detail, { bubbles = false, cancelable = false } = {}) {
         const e = document.createEvent('CustomEvent');
-        e.initCustomEvent(type, bubbles, false, detail);
+        e.initCustomEvent(type, bubbles, cancelable, detail);
         return e;
     }
 
@@ -88,15 +93,24 @@ var app = (function () {
             throw new Error('Function called outside component initialization');
         return current_component;
     }
+    /**
+     * The `onMount` function schedules a callback to run as soon as the component has been mounted to the DOM.
+     * It must be called during the component's initialisation (but doesn't need to live *inside* the component;
+     * it can be called from an external module).
+     *
+     * `onMount` does not run inside a [server-side component](/docs#run-time-server-side-component-api).
+     *
+     * https://svelte.dev/docs#run-time-svelte-onmount
+     */
     function onMount(fn) {
         get_current_component().$$.on_mount.push(fn);
     }
 
     const dirty_components = [];
     const binding_callbacks = [];
-    const render_callbacks = [];
+    let render_callbacks = [];
     const flush_callbacks = [];
-    const resolved_promise = Promise.resolve();
+    const resolved_promise = /* @__PURE__ */ Promise.resolve();
     let update_scheduled = false;
     function schedule_update() {
         if (!update_scheduled) {
@@ -128,15 +142,29 @@ var app = (function () {
     const seen_callbacks = new Set();
     let flushidx = 0; // Do *not* move this inside the flush() function
     function flush() {
+        // Do not reenter flush while dirty components are updated, as this can
+        // result in an infinite loop. Instead, let the inner flush handle it.
+        // Reentrancy is ok afterwards for bindings etc.
+        if (flushidx !== 0) {
+            return;
+        }
         const saved_component = current_component;
         do {
             // first, call beforeUpdate functions
             // and update components
-            while (flushidx < dirty_components.length) {
-                const component = dirty_components[flushidx];
-                flushidx++;
-                set_current_component(component);
-                update(component.$$);
+            try {
+                while (flushidx < dirty_components.length) {
+                    const component = dirty_components[flushidx];
+                    flushidx++;
+                    set_current_component(component);
+                    update(component.$$);
+                }
+            }
+            catch (e) {
+                // reset dirty state to not end up in a deadlocked state and then rethrow
+                dirty_components.length = 0;
+                flushidx = 0;
+                throw e;
             }
             set_current_component(null);
             dirty_components.length = 0;
@@ -173,6 +201,16 @@ var app = (function () {
             $$.after_update.forEach(add_render_callback);
         }
     }
+    /**
+     * Useful for example to execute remaining `afterUpdate` callbacks before executing `destroy`.
+     */
+    function flush_render_callbacks(fns) {
+        const filtered = [];
+        const targets = [];
+        render_callbacks.forEach((c) => fns.indexOf(c) === -1 ? filtered.push(c) : targets.push(c));
+        targets.forEach((c) => c());
+        render_callbacks = filtered;
+    }
     const outroing = new Set();
     let outros;
     function group_outros() {
@@ -208,6 +246,9 @@ var app = (function () {
                 }
             });
             block.o(local);
+        }
+        else if (callback) {
+            callback();
         }
     }
 
@@ -251,14 +292,17 @@ var app = (function () {
         block && block.c();
     }
     function mount_component(component, target, anchor, customElement) {
-        const { fragment, on_mount, on_destroy, after_update } = component.$$;
+        const { fragment, after_update } = component.$$;
         fragment && fragment.m(target, anchor);
         if (!customElement) {
             // onMount happens before the initial afterUpdate
             add_render_callback(() => {
-                const new_on_destroy = on_mount.map(run).filter(is_function);
-                if (on_destroy) {
-                    on_destroy.push(...new_on_destroy);
+                const new_on_destroy = component.$$.on_mount.map(run).filter(is_function);
+                // if the component was destroyed immediately
+                // it will update the `$$.on_destroy` reference to `null`.
+                // the destructured on_destroy may still reference to the old array
+                if (component.$$.on_destroy) {
+                    component.$$.on_destroy.push(...new_on_destroy);
                 }
                 else {
                     // Edge case - component was destroyed immediately,
@@ -273,6 +317,7 @@ var app = (function () {
     function destroy_component(component, detaching) {
         const $$ = component.$$;
         if ($$.fragment !== null) {
+            flush_render_callbacks($$.after_update);
             run_all($$.on_destroy);
             $$.fragment && $$.fragment.d(detaching);
             // TODO null out other refs, including component.$$ (but need to
@@ -294,7 +339,7 @@ var app = (function () {
         set_current_component(component);
         const $$ = component.$$ = {
             fragment: null,
-            ctx: null,
+            ctx: [],
             // state
             props,
             update: noop,
@@ -359,6 +404,9 @@ var app = (function () {
             this.$destroy = noop;
         }
         $on(type, callback) {
+            if (!is_function(callback)) {
+                return noop;
+            }
             const callbacks = (this.$$.callbacks[type] || (this.$$.callbacks[type] = []));
             callbacks.push(callback);
             return () => {
@@ -377,7 +425,7 @@ var app = (function () {
     }
 
     function dispatch_dev(type, detail) {
-        document.dispatchEvent(custom_event(type, Object.assign({ version: '3.46.3' }, detail), true));
+        document.dispatchEvent(custom_event(type, Object.assign({ version: '3.59.2' }, detail), { bubbles: true }));
     }
     function append_dev(target, node) {
         dispatch_dev('SvelteDOMInsert', { target, node });
@@ -391,12 +439,14 @@ var app = (function () {
         dispatch_dev('SvelteDOMRemove', { node });
         detach(node);
     }
-    function listen_dev(node, event, handler, options, has_prevent_default, has_stop_propagation) {
+    function listen_dev(node, event, handler, options, has_prevent_default, has_stop_propagation, has_stop_immediate_propagation) {
         const modifiers = options === true ? ['capture'] : options ? Array.from(Object.keys(options)) : [];
         if (has_prevent_default)
             modifiers.push('preventDefault');
         if (has_stop_propagation)
             modifiers.push('stopPropagation');
+        if (has_stop_immediate_propagation)
+            modifiers.push('stopImmediatePropagation');
         dispatch_dev('SvelteDOMAddEventListener', { node, event, handler, modifiers });
         const dispose = listen(node, event, handler, options);
         return () => {
@@ -413,7 +463,7 @@ var app = (function () {
     }
     function set_data_dev(text, data) {
         data = '' + data;
-        if (text.wholeText === data)
+        if (text.data === data)
             return;
         dispatch_dev('SvelteDOMSetData', { node: text, data });
         text.data = data;
@@ -431,6 +481,25 @@ var app = (function () {
         for (const slot_key of Object.keys(slot)) {
             if (!~keys.indexOf(slot_key)) {
                 console.warn(`<${name}> received an unexpected slot "${slot_key}".`);
+            }
+        }
+    }
+    function construct_svelte_component_dev(component, props) {
+        const error_message = 'this={...} of <svelte:component> should specify a Svelte component.';
+        try {
+            const instance = new component(props);
+            if (!instance.$$ || !instance.$set || !instance.$on || !instance.$destroy) {
+                throw new Error(error_message);
+            }
+            return instance;
+        }
+        catch (err) {
+            const { message } = err;
+            if (typeof message === 'string' && message.indexOf('is not a constructor') !== -1) {
+                throw new Error(error_message);
+            }
+            else {
+                throw err;
             }
         }
     }
@@ -680,15 +749,15 @@ var app = (function () {
     var brighter = 1 / darker;
 
     var reI = "\\s*([+-]?\\d+)\\s*",
-        reN = "\\s*([+-]?\\d*\\.?\\d+(?:[eE][+-]?\\d+)?)\\s*",
-        reP = "\\s*([+-]?\\d*\\.?\\d+(?:[eE][+-]?\\d+)?)%\\s*",
+        reN = "\\s*([+-]?(?:\\d*\\.)?\\d+(?:[eE][+-]?\\d+)?)\\s*",
+        reP = "\\s*([+-]?(?:\\d*\\.)?\\d+(?:[eE][+-]?\\d+)?)%\\s*",
         reHex = /^#([0-9a-f]{3,8})$/,
-        reRgbInteger = new RegExp("^rgb\\(" + [reI, reI, reI] + "\\)$"),
-        reRgbPercent = new RegExp("^rgb\\(" + [reP, reP, reP] + "\\)$"),
-        reRgbaInteger = new RegExp("^rgba\\(" + [reI, reI, reI, reN] + "\\)$"),
-        reRgbaPercent = new RegExp("^rgba\\(" + [reP, reP, reP, reN] + "\\)$"),
-        reHslPercent = new RegExp("^hsl\\(" + [reN, reP, reP] + "\\)$"),
-        reHslaPercent = new RegExp("^hsla\\(" + [reN, reP, reP, reN] + "\\)$");
+        reRgbInteger = new RegExp(`^rgb\\(${reI},${reI},${reI}\\)$`),
+        reRgbPercent = new RegExp(`^rgb\\(${reP},${reP},${reP}\\)$`),
+        reRgbaInteger = new RegExp(`^rgba\\(${reI},${reI},${reI},${reN}\\)$`),
+        reRgbaPercent = new RegExp(`^rgba\\(${reP},${reP},${reP},${reN}\\)$`),
+        reHslPercent = new RegExp(`^hsl\\(${reN},${reP},${reP}\\)$`),
+        reHslaPercent = new RegExp(`^hsla\\(${reN},${reP},${reP},${reN}\\)$`);
 
     var named = {
       aliceblue: 0xf0f8ff,
@@ -842,14 +911,15 @@ var app = (function () {
     };
 
     define(Color, color, {
-      copy: function(channels) {
+      copy(channels) {
         return Object.assign(new this.constructor, this, channels);
       },
-      displayable: function() {
+      displayable() {
         return this.rgb().displayable();
       },
       hex: color_formatHex, // Deprecated! Use color.formatHex.
       formatHex: color_formatHex,
+      formatHex8: color_formatHex8,
       formatHsl: color_formatHsl,
       formatRgb: color_formatRgb,
       toString: color_formatRgb
@@ -857,6 +927,10 @@ var app = (function () {
 
     function color_formatHex() {
       return this.rgb().formatHex();
+    }
+
+    function color_formatHex8() {
+      return this.rgb().formatHex8();
     }
 
     function color_formatHsl() {
@@ -914,18 +988,21 @@ var app = (function () {
     }
 
     define(Rgb, rgb$1, extend(Color, {
-      brighter: function(k) {
+      brighter(k) {
         k = k == null ? brighter : Math.pow(brighter, k);
         return new Rgb(this.r * k, this.g * k, this.b * k, this.opacity);
       },
-      darker: function(k) {
+      darker(k) {
         k = k == null ? darker : Math.pow(darker, k);
         return new Rgb(this.r * k, this.g * k, this.b * k, this.opacity);
       },
-      rgb: function() {
+      rgb() {
         return this;
       },
-      displayable: function() {
+      clamp() {
+        return new Rgb(clampi(this.r), clampi(this.g), clampi(this.b), clampa(this.opacity));
+      },
+      displayable() {
         return (-0.5 <= this.r && this.r < 255.5)
             && (-0.5 <= this.g && this.g < 255.5)
             && (-0.5 <= this.b && this.b < 255.5)
@@ -933,25 +1010,34 @@ var app = (function () {
       },
       hex: rgb_formatHex, // Deprecated! Use color.formatHex.
       formatHex: rgb_formatHex,
+      formatHex8: rgb_formatHex8,
       formatRgb: rgb_formatRgb,
       toString: rgb_formatRgb
     }));
 
     function rgb_formatHex() {
-      return "#" + hex(this.r) + hex(this.g) + hex(this.b);
+      return `#${hex(this.r)}${hex(this.g)}${hex(this.b)}`;
+    }
+
+    function rgb_formatHex8() {
+      return `#${hex(this.r)}${hex(this.g)}${hex(this.b)}${hex((isNaN(this.opacity) ? 1 : this.opacity) * 255)}`;
     }
 
     function rgb_formatRgb() {
-      var a = this.opacity; a = isNaN(a) ? 1 : Math.max(0, Math.min(1, a));
-      return (a === 1 ? "rgb(" : "rgba(")
-          + Math.max(0, Math.min(255, Math.round(this.r) || 0)) + ", "
-          + Math.max(0, Math.min(255, Math.round(this.g) || 0)) + ", "
-          + Math.max(0, Math.min(255, Math.round(this.b) || 0))
-          + (a === 1 ? ")" : ", " + a + ")");
+      const a = clampa(this.opacity);
+      return `${a === 1 ? "rgb(" : "rgba("}${clampi(this.r)}, ${clampi(this.g)}, ${clampi(this.b)}${a === 1 ? ")" : `, ${a})`}`;
+    }
+
+    function clampa(opacity) {
+      return isNaN(opacity) ? 1 : Math.max(0, Math.min(1, opacity));
+    }
+
+    function clampi(value) {
+      return Math.max(0, Math.min(255, Math.round(value) || 0));
     }
 
     function hex(value) {
-      value = Math.max(0, Math.min(255, Math.round(value) || 0));
+      value = clampi(value);
       return (value < 16 ? "0" : "") + value.toString(16);
     }
 
@@ -1000,15 +1086,15 @@ var app = (function () {
     }
 
     define(Hsl, hsl, extend(Color, {
-      brighter: function(k) {
+      brighter(k) {
         k = k == null ? brighter : Math.pow(brighter, k);
         return new Hsl(this.h, this.s, this.l * k, this.opacity);
       },
-      darker: function(k) {
+      darker(k) {
         k = k == null ? darker : Math.pow(darker, k);
         return new Hsl(this.h, this.s, this.l * k, this.opacity);
       },
-      rgb: function() {
+      rgb() {
         var h = this.h % 360 + (this.h < 0) * 360,
             s = isNaN(h) || isNaN(this.s) ? 0 : this.s,
             l = this.l,
@@ -1021,20 +1107,28 @@ var app = (function () {
           this.opacity
         );
       },
-      displayable: function() {
+      clamp() {
+        return new Hsl(clamph(this.h), clampt(this.s), clampt(this.l), clampa(this.opacity));
+      },
+      displayable() {
         return (0 <= this.s && this.s <= 1 || isNaN(this.s))
             && (0 <= this.l && this.l <= 1)
             && (0 <= this.opacity && this.opacity <= 1);
       },
-      formatHsl: function() {
-        var a = this.opacity; a = isNaN(a) ? 1 : Math.max(0, Math.min(1, a));
-        return (a === 1 ? "hsl(" : "hsla(")
-            + (this.h || 0) + ", "
-            + (this.s || 0) * 100 + "%, "
-            + (this.l || 0) * 100 + "%"
-            + (a === 1 ? ")" : ", " + a + ")");
+      formatHsl() {
+        const a = clampa(this.opacity);
+        return `${a === 1 ? "hsl(" : "hsla("}${clamph(this.h)}, ${clampt(this.s) * 100}%, ${clampt(this.l) * 100}%${a === 1 ? ")" : `, ${a})`}`;
       }
     }));
+
+    function clamph(value) {
+      value = (value || 0) % 360;
+      return value < 0 ? value + 360 : value;
+    }
+
+    function clampt(value) {
+      return Math.max(0, Math.min(1, value || 0));
+    }
 
     /* From FvD 13.37, CSS Color Module Level 3 */
     function hsl2rgb(h, m1, m2) {
@@ -1790,7 +1884,7 @@ var app = (function () {
       return linearish(scale);
     }
 
-    /* src\components\Tick.svelte generated by Svelte v3.46.3 */
+    /* src\components\Tick.svelte generated by Svelte v3.59.2 */
 
     const file$4 = "src\\components\\Tick.svelte";
 
@@ -1962,6 +2056,28 @@ var app = (function () {
     	? formatFunction(value)
     	: format ? nFormatter(value) : value;
 
+    	$$self.$$.on_mount.push(function () {
+    		if (x === undefined && !('x' in $$props || $$self.$$.bound[$$self.$$.props['x']])) {
+    			console.warn("<Tick> was created without expected prop 'x'");
+    		}
+
+    		if (y === undefined && !('y' in $$props || $$self.$$.bound[$$self.$$.props['y']])) {
+    			console.warn("<Tick> was created without expected prop 'y'");
+    		}
+
+    		if (value === undefined && !('value' in $$props || $$self.$$.bound[$$self.$$.props['value']])) {
+    			console.warn("<Tick> was created without expected prop 'value'");
+    		}
+
+    		if (direction === undefined && !('direction' in $$props || $$self.$$.bound[$$self.$$.props['direction']])) {
+    			console.warn("<Tick> was created without expected prop 'direction'");
+    		}
+
+    		if (formatFunction === undefined && !('formatFunction' in $$props || $$self.$$.bound[$$self.$$.props['formatFunction']])) {
+    			console.warn("<Tick> was created without expected prop 'formatFunction'");
+    		}
+    	});
+
     	const writable_props = ['x', 'y', 'value', 'direction', 'format', 'formatFunction'];
 
     	Object.keys($$props).forEach(key => {
@@ -2024,29 +2140,6 @@ var app = (function () {
     			options,
     			id: create_fragment$4.name
     		});
-
-    		const { ctx } = this.$$;
-    		const props = options.props || {};
-
-    		if (/*x*/ ctx[4] === undefined && !('x' in props)) {
-    			console.warn("<Tick> was created without expected prop 'x'");
-    		}
-
-    		if (/*y*/ ctx[0] === undefined && !('y' in props)) {
-    			console.warn("<Tick> was created without expected prop 'y'");
-    		}
-
-    		if (/*value*/ ctx[5] === undefined && !('value' in props)) {
-    			console.warn("<Tick> was created without expected prop 'value'");
-    		}
-
-    		if (/*direction*/ ctx[1] === undefined && !('direction' in props)) {
-    			console.warn("<Tick> was created without expected prop 'direction'");
-    		}
-
-    		if (/*formatFunction*/ ctx[7] === undefined && !('formatFunction' in props)) {
-    			console.warn("<Tick> was created without expected prop 'formatFunction'");
-    		}
     	}
 
     	get x() {
@@ -2098,7 +2191,7 @@ var app = (function () {
     	}
     }
 
-    /* src\components\Tooltip.svelte generated by Svelte v3.46.3 */
+    /* src\components\Tooltip.svelte generated by Svelte v3.59.2 */
     const file$3 = "src\\components\\Tooltip.svelte";
 
     function get_each_context$1(ctx, list, i) {
@@ -2305,7 +2398,9 @@ var app = (function () {
     			append_dev(svg, if_block_anchor);
 
     			for (let i = 0; i < each_blocks.length; i += 1) {
-    				each_blocks[i].m(svg, null);
+    				if (each_blocks[i]) {
+    					each_blocks[i].m(svg, null);
+    				}
     			}
     		},
     		p: function update(ctx, [dirty]) {
@@ -2441,6 +2536,32 @@ var app = (function () {
     		}
     	});
 
+    	$$self.$$.on_mount.push(function () {
+    		if (labels === undefined && !('labels' in $$props || $$self.$$.bound[$$self.$$.props['labels']])) {
+    			console.warn("<Tooltip> was created without expected prop 'labels'");
+    		}
+
+    		if (values === undefined && !('values' in $$props || $$self.$$.bound[$$self.$$.props['values']])) {
+    			console.warn("<Tooltip> was created without expected prop 'values'");
+    		}
+
+    		if (colorScale === undefined && !('colorScale' in $$props || $$self.$$.bound[$$self.$$.props['colorScale']])) {
+    			console.warn("<Tooltip> was created without expected prop 'colorScale'");
+    		}
+
+    		if (x === undefined && !('x' in $$props || $$self.$$.bound[$$self.$$.props['x']])) {
+    			console.warn("<Tooltip> was created without expected prop 'x'");
+    		}
+
+    		if (y === undefined && !('y' in $$props || $$self.$$.bound[$$self.$$.props['y']])) {
+    			console.warn("<Tooltip> was created without expected prop 'y'");
+    		}
+
+    		if (title === undefined && !('title' in $$props || $$self.$$.bound[$$self.$$.props['title']])) {
+    			console.warn("<Tooltip> was created without expected prop 'title'");
+    		}
+    	});
+
     	const writable_props = [
     		'labels',
     		'values',
@@ -2556,33 +2677,6 @@ var app = (function () {
     			options,
     			id: create_fragment$3.name
     		});
-
-    		const { ctx } = this.$$;
-    		const props = options.props || {};
-
-    		if (/*labels*/ ctx[0] === undefined && !('labels' in props)) {
-    			console.warn("<Tooltip> was created without expected prop 'labels'");
-    		}
-
-    		if (/*values*/ ctx[1] === undefined && !('values' in props)) {
-    			console.warn("<Tooltip> was created without expected prop 'values'");
-    		}
-
-    		if (/*colorScale*/ ctx[2] === undefined && !('colorScale' in props)) {
-    			console.warn("<Tooltip> was created without expected prop 'colorScale'");
-    		}
-
-    		if (/*x*/ ctx[3] === undefined && !('x' in props)) {
-    			console.warn("<Tooltip> was created without expected prop 'x'");
-    		}
-
-    		if (/*y*/ ctx[4] === undefined && !('y' in props)) {
-    			console.warn("<Tooltip> was created without expected prop 'y'");
-    		}
-
-    		if (/*title*/ ctx[8] === undefined && !('title' in props)) {
-    			console.warn("<Tooltip> was created without expected prop 'title'");
-    		}
     	}
 
     	get labels() {
@@ -2674,7 +2768,7 @@ var app = (function () {
     	}
     }
 
-    /* src\components\LineChart.svelte generated by Svelte v3.46.3 */
+    /* src\components\LineChart.svelte generated by Svelte v3.59.2 */
     const file$2 = "src\\components\\LineChart.svelte";
 
     function get_each_context(ctx, list, i) {
@@ -2834,7 +2928,9 @@ var app = (function () {
     		},
     		m: function mount(target, anchor) {
     			for (let i = 0; i < each_blocks.length; i += 1) {
-    				each_blocks[i].m(target, anchor);
+    				if (each_blocks[i]) {
+    					each_blocks[i].m(target, anchor);
+    				}
     			}
 
     			insert_dev(target, each_1_anchor, anchor);
@@ -3022,7 +3118,9 @@ var app = (function () {
     			append_dev(g, line);
 
     			for (let i = 0; i < each_blocks.length; i += 1) {
-    				each_blocks[i].m(g, null);
+    				if (each_blocks[i]) {
+    					each_blocks[i].m(g, null);
+    				}
     			}
     		},
     		p: function update(ctx, dirty) {
@@ -3297,7 +3395,9 @@ var app = (function () {
     			append_dev(svg, g0);
 
     			for (let i = 0; i < each_blocks_2.length; i += 1) {
-    				each_blocks_2[i].m(g0, null);
+    				if (each_blocks_2[i]) {
+    					each_blocks_2[i].m(g0, null);
+    				}
     			}
 
     			append_dev(svg, g1);
@@ -3306,13 +3406,17 @@ var app = (function () {
     			append_dev(svg, g2);
 
     			for (let i = 0; i < each_blocks_1.length; i += 1) {
-    				each_blocks_1[i].m(g2, null);
+    				if (each_blocks_1[i]) {
+    					each_blocks_1[i].m(g2, null);
+    				}
     			}
 
     			append_dev(svg, g3);
 
     			for (let i = 0; i < each_blocks.length; i += 1) {
-    				each_blocks[i].m(g3, null);
+    				if (each_blocks[i]) {
+    					each_blocks[i].m(g3, null);
+    				}
     			}
 
     			if (if_block0) if_block0.m(svg, null);
@@ -3322,8 +3426,8 @@ var app = (function () {
 
     			if (!mounted) {
     				dispose = [
-    					listen_dev(svg, "mousemove", /*followMouse*/ ctx[13], false, false, false),
-    					listen_dev(svg, "mouseleave", /*removePointer*/ ctx[14], false, false, false)
+    					listen_dev(svg, "mousemove", /*followMouse*/ ctx[13], false, false, false, false),
+    					listen_dev(svg, "mouseleave", /*removePointer*/ ctx[14], false, false, false, false)
     				];
 
     				mounted = true;
@@ -3584,6 +3688,32 @@ var app = (function () {
     		return data.filter(d => xScale(d[xVar]) >= value)[0][xVar];
     	}
 
+    	$$self.$$.on_mount.push(function () {
+    		if (chartWidth === undefined && !('chartWidth' in $$props || $$self.$$.bound[$$self.$$.props['chartWidth']])) {
+    			console.warn("<LineChart> was created without expected prop 'chartWidth'");
+    		}
+
+    		if (chartHeight === undefined && !('chartHeight' in $$props || $$self.$$.bound[$$self.$$.props['chartHeight']])) {
+    			console.warn("<LineChart> was created without expected prop 'chartHeight'");
+    		}
+
+    		if (data === undefined && !('data' in $$props || $$self.$$.bound[$$self.$$.props['data']])) {
+    			console.warn("<LineChart> was created without expected prop 'data'");
+    		}
+
+    		if (xVar === undefined && !('xVar' in $$props || $$self.$$.bound[$$self.$$.props['xVar']])) {
+    			console.warn("<LineChart> was created without expected prop 'xVar'");
+    		}
+
+    		if (yVars === undefined && !('yVars' in $$props || $$self.$$.bound[$$self.$$.props['yVars']])) {
+    			console.warn("<LineChart> was created without expected prop 'yVars'");
+    		}
+
+    		if (colorFunction === undefined && !('colorFunction' in $$props || $$self.$$.bound[$$self.$$.props['colorFunction']])) {
+    			console.warn("<LineChart> was created without expected prop 'colorFunction'");
+    		}
+    	});
+
     	const writable_props = ['chartWidth', 'chartHeight', 'data', 'xVar', 'yVars', 'colorFunction'];
 
     	Object.keys($$props).forEach(key => {
@@ -3692,33 +3822,6 @@ var app = (function () {
     			options,
     			id: create_fragment$2.name
     		});
-
-    		const { ctx } = this.$$;
-    		const props = options.props || {};
-
-    		if (/*chartWidth*/ ctx[0] === undefined && !('chartWidth' in props)) {
-    			console.warn("<LineChart> was created without expected prop 'chartWidth'");
-    		}
-
-    		if (/*chartHeight*/ ctx[1] === undefined && !('chartHeight' in props)) {
-    			console.warn("<LineChart> was created without expected prop 'chartHeight'");
-    		}
-
-    		if (/*data*/ ctx[2] === undefined && !('data' in props)) {
-    			console.warn("<LineChart> was created without expected prop 'data'");
-    		}
-
-    		if (/*xVar*/ ctx[3] === undefined && !('xVar' in props)) {
-    			console.warn("<LineChart> was created without expected prop 'xVar'");
-    		}
-
-    		if (/*yVars*/ ctx[4] === undefined && !('yVars' in props)) {
-    			console.warn("<LineChart> was created without expected prop 'yVars'");
-    		}
-
-    		if (/*colorFunction*/ ctx[16] === undefined && !('colorFunction' in props)) {
-    			console.warn("<LineChart> was created without expected prop 'colorFunction'");
-    		}
     	}
 
     	get chartWidth() {
@@ -3770,7 +3873,7 @@ var app = (function () {
     	}
     }
 
-    /* src\components\ChartContainer.svelte generated by Svelte v3.46.3 */
+    /* src\components\ChartContainer.svelte generated by Svelte v3.59.2 */
     const file$1 = "src\\components\\ChartContainer.svelte";
 
     // (44:2) {:else}
@@ -3803,7 +3906,7 @@ var app = (function () {
     	}
 
     	if (switch_value) {
-    		switch_instance = new switch_value(switch_props());
+    		switch_instance = construct_svelte_component_dev(switch_value, switch_props());
     	}
 
     	const block = {
@@ -3812,10 +3915,7 @@ var app = (function () {
     			switch_instance_anchor = empty();
     		},
     		m: function mount(target, anchor) {
-    			if (switch_instance) {
-    				mount_component(switch_instance, target, anchor);
-    			}
-
+    			if (switch_instance) mount_component(switch_instance, target, anchor);
     			insert_dev(target, switch_instance_anchor, anchor);
     			current = true;
     		},
@@ -3830,7 +3930,7 @@ var app = (function () {
     				])
     			: {};
 
-    			if (switch_value !== (switch_value = /*CHART_TYPES*/ ctx[3][/*type*/ ctx[0]])) {
+    			if (dirty & /*type*/ 1 && switch_value !== (switch_value = /*CHART_TYPES*/ ctx[3][/*type*/ ctx[0]])) {
     				if (switch_instance) {
     					group_outros();
     					const old_component = switch_instance;
@@ -3843,7 +3943,7 @@ var app = (function () {
     				}
 
     				if (switch_value) {
-    					switch_instance = new switch_value(switch_props());
+    					switch_instance = construct_svelte_component_dev(switch_value, switch_props());
     					create_component(switch_instance.$$.fragment);
     					transition_in(switch_instance.$$.fragment, 1);
     					mount_component(switch_instance, switch_instance_anchor.parentNode, switch_instance_anchor);
@@ -3902,7 +4002,7 @@ var app = (function () {
     	}
 
     	if (switch_value) {
-    		switch_instance = new switch_value(switch_props());
+    		switch_instance = construct_svelte_component_dev(switch_value, switch_props());
     	}
 
     	const block = {
@@ -3911,10 +4011,7 @@ var app = (function () {
     			switch_instance_anchor = empty();
     		},
     		m: function mount(target, anchor) {
-    			if (switch_instance) {
-    				mount_component(switch_instance, target, anchor);
-    			}
-
+    			if (switch_instance) mount_component(switch_instance, target, anchor);
     			insert_dev(target, switch_instance_anchor, anchor);
     			current = true;
     		},
@@ -3927,7 +4024,7 @@ var app = (function () {
     				])
     			: {};
 
-    			if (switch_value !== (switch_value = /*CHART_TYPES*/ ctx[3][/*type*/ ctx[0]])) {
+    			if (dirty & /*type*/ 1 && switch_value !== (switch_value = /*CHART_TYPES*/ ctx[3][/*type*/ ctx[0]])) {
     				if (switch_instance) {
     					group_outros();
     					const old_component = switch_instance;
@@ -3940,7 +4037,7 @@ var app = (function () {
     				}
 
     				if (switch_value) {
-    					switch_instance = new switch_value(switch_props());
+    					switch_instance = construct_svelte_component_dev(switch_value, switch_props());
     					create_component(switch_instance.$$.fragment);
     					transition_in(switch_instance.$$.fragment, 1);
     					mount_component(switch_instance, switch_instance_anchor.parentNode, switch_instance_anchor);
@@ -3999,7 +4096,7 @@ var app = (function () {
     	}
 
     	if (switch_value) {
-    		switch_instance = new switch_value(switch_props());
+    		switch_instance = construct_svelte_component_dev(switch_value, switch_props());
     	}
 
     	const block = {
@@ -4008,10 +4105,7 @@ var app = (function () {
     			switch_instance_anchor = empty();
     		},
     		m: function mount(target, anchor) {
-    			if (switch_instance) {
-    				mount_component(switch_instance, target, anchor);
-    			}
-
+    			if (switch_instance) mount_component(switch_instance, target, anchor);
     			insert_dev(target, switch_instance_anchor, anchor);
     			current = true;
     		},
@@ -4024,7 +4118,7 @@ var app = (function () {
     				])
     			: {};
 
-    			if (switch_value !== (switch_value = /*CHART_TYPES*/ ctx[3][/*type*/ ctx[0]])) {
+    			if (dirty & /*type*/ 1 && switch_value !== (switch_value = /*CHART_TYPES*/ ctx[3][/*type*/ ctx[0]])) {
     				if (switch_instance) {
     					group_outros();
     					const old_component = switch_instance;
@@ -4037,7 +4131,7 @@ var app = (function () {
     				}
 
     				if (switch_value) {
-    					switch_instance = new switch_value(switch_props());
+    					switch_instance = construct_svelte_component_dev(switch_value, switch_props());
     					create_component(switch_instance.$$.fragment);
     					transition_in(switch_instance.$$.fragment, 1);
     					mount_component(switch_instance, switch_instance_anchor.parentNode, switch_instance_anchor);
@@ -4180,6 +4274,16 @@ var app = (function () {
     		}
     	});
 
+    	$$self.$$.on_mount.push(function () {
+    		if (type === undefined && !('type' in $$props || $$self.$$.bound[$$self.$$.props['type']])) {
+    			console.warn("<ChartContainer> was created without expected prop 'type'");
+    		}
+
+    		if (chartProps === undefined && !('chartProps' in $$props || $$self.$$.bound[$$self.$$.props['chartProps']])) {
+    			console.warn("<ChartContainer> was created without expected prop 'chartProps'");
+    		}
+    	});
+
     	const writable_props = ['type', 'chartProps'];
 
     	Object.keys($$props).forEach(key => {
@@ -4225,17 +4329,6 @@ var app = (function () {
     			options,
     			id: create_fragment$1.name
     		});
-
-    		const { ctx } = this.$$;
-    		const props = options.props || {};
-
-    		if (/*type*/ ctx[0] === undefined && !('type' in props)) {
-    			console.warn("<ChartContainer> was created without expected prop 'type'");
-    		}
-
-    		if (/*chartProps*/ ctx[1] === undefined && !('chartProps' in props)) {
-    			console.warn("<ChartContainer> was created without expected prop 'chartProps'");
-    		}
     	}
 
     	get type() {
@@ -4448,11 +4541,16 @@ var app = (function () {
       wind: 820.949}
     ];
 
-    /* src\App.svelte generated by Svelte v3.46.3 */
+    /* src\App.svelte generated by Svelte v3.59.2 */
     const file = "src\\App.svelte";
 
     function create_fragment(ctx) {
     	let main;
+    	let h1;
+    	let t1;
+    	let p;
+    	let t3;
+    	let div;
     	let chartcontainer;
     	let current;
 
@@ -4461,7 +4559,7 @@ var app = (function () {
     				type: "lineChart",
     				chartProps: {
     					data: energy_1,
-    					xVar: "ear",
+    					xVar: "year",
     					yVars: ["biofuel", "coal", "fossil", "gas", "hydro", "nuclear", "oil", "solar"]
     				}
     			},
@@ -4471,15 +4569,33 @@ var app = (function () {
     	const block = {
     		c: function create() {
     			main = element("main");
+    			h1 = element("h1");
+    			h1.textContent = "Energy Generation";
+    			t1 = space();
+    			p = element("p");
+    			p.textContent = "...";
+    			t3 = space();
+    			div = element("div");
     			create_component(chartcontainer.$$.fragment);
-    			add_location(main, file, 5, 0, 129);
+    			attr_dev(h1, "class", "svelte-tqu0mb");
+    			add_location(h1, file, 6, 2, 144);
+    			attr_dev(p, "class", "svelte-tqu0mb");
+    			add_location(p, file, 8, 1, 175);
+    			attr_dev(div, "class", "chart svelte-tqu0mb");
+    			add_location(div, file, 10, 2, 191);
+    			add_location(main, file, 5, 0, 134);
     		},
     		l: function claim(nodes) {
     			throw new Error("options.hydrate only works if the component was compiled with the `hydratable: true` option");
     		},
     		m: function mount(target, anchor) {
     			insert_dev(target, main, anchor);
-    			mount_component(chartcontainer, main, null);
+    			append_dev(main, h1);
+    			append_dev(main, t1);
+    			append_dev(main, p);
+    			append_dev(main, t3);
+    			append_dev(main, div);
+    			mount_component(chartcontainer, div, null);
     			current = true;
     		},
     		p: noop,
